@@ -26,13 +26,15 @@ class Column
     public $additionalSelects = [];
     public $filterView;
     public $align = 'left';
+    public $preventExport;
+    public $width;
 
     public static function name($name)
     {
         $column = new static;
         $column->name = $name;
         $column->aggregate = Str::contains($name, ':') ? Str::after($name, ':') : $column->aggregate();
-        $column->label = (string) Str::of($name)->after('.')->ucfirst();
+        $column->label = (string) Str::of($name)->after('.')->ucfirst()->replace('_', ' ');
 
         if (Str::contains(Str::lower($name), ' as ')) {
             $column->name = array_reverse(preg_split('/ as /i', $name))[0];
@@ -126,11 +128,26 @@ class Column
         return $this;
     }
 
+    public function booleanFilterable()
+    {
+        $this->filterable = true;
+        $this->filterView = 'boolean';
+
+        return $this;
+    }
+
+    public function excludeFromExport()
+    {
+        $this->preventExport = true;
+
+        return $this;
+    }
+
     public function linkTo($model, $pad = null)
     {
         $this->callback = function ($value) use ($model, $pad) {
             return view('datatables::link', [
-                'href' => "/$model/$value",
+                'href' => url("/$model/$value"),
                 'slot' => $pad ? str_pad($value, $pad, '0', STR_PAD_LEFT) : $value,
             ]);
         };
@@ -161,6 +178,13 @@ class Column
         $this->callback = function ($value, $row) use ($view) {
             return view($view, ['value' => $value, 'row' => $row]);
         };
+
+        return $this;
+    }
+
+    public function filterView($view)
+    {
+        $this->filterView = $view;
 
         return $this;
     }
@@ -243,6 +267,30 @@ class Column
     public function setType($type)
     {
         $this->type = $type;
+
+        return $this;
+    }
+
+    public function addParams($params)
+    {
+        $this->params = $params;
+
+        return $this;
+    }
+
+    public function width($width)
+    {
+        // only numbers? add the default px unit
+        if (preg_match('/^\\d*\\.?\\d+$/i', $width) === 1) {
+            $width .= 'px';
+        }
+
+        // check if the $with contains invalid units
+        if (preg_match('/^(\\d*\\.?\\d+)\\s?(cm|mm|in|px|pt|pc|em|ex|ch|rem|vw|vmin|vmax|%+)$/i', $width) === 0) {
+            return $this;
+        }
+
+        $this->width = $width;
 
         return $this;
     }

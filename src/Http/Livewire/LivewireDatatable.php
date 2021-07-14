@@ -53,9 +53,15 @@ class LivewireDatatable extends Component
     public $selected = [];
     public $beforeTableSlot;
     public $afterTableSlot;
+    public $name;
 
     protected $query;
     protected $listeners = ['refreshLivewireDatatable'];
+
+    public function updatedSearch()
+    {
+        $this->page = 1;
+    }
 
     public function mount(
         $model = null,
@@ -68,14 +74,14 @@ class LivewireDatatable extends Component
         $sort = null,
         $hideHeader = null,
         $hidePagination = null,
-        $perPage = 10,
+        $perPage = null,
         $exportable = false,
         $hideable = false,
         $beforeTableSlot = false,
         $afterTableSlot = false,
         $params = []
     ) {
-        foreach (['model', 'include', 'exclude', 'hide', 'dates', 'times', 'searchable', 'sort', 'hideHeader', 'hidePagination', 'perPage', 'exportable', 'hideable', 'beforeTableSlot', 'afterTableSlot'] as $property) {
+        foreach (['model', 'include', 'exclude', 'hide', 'dates', 'times', 'searchable', 'sort', 'hideHeader', 'hidePagination', 'exportable', 'hideable', 'beforeTableSlot', 'afterTableSlot'] as $property) {
             $this->$property = $this->$property ?? $$property;
         }
 
@@ -84,6 +90,12 @@ class LivewireDatatable extends Component
         $this->columns = $this->getViewColumns();
 
         $this->initialiseSort();
+
+        // check if there are sorting vars in the session
+        $key = Str::snake(Str::afterLast(get_called_class(), '\\'));
+        $this->sort = session()->get($key.$this->name.'_sort', $this->sort);
+        $this->direction = session()->get($key.$this->name.'_direction', $this->direction);
+        $this->perPage = $perPage ?? $this->perPage ?? config('livewire-datatables.default_per_page', 10);
     }
 
     public function columns()
@@ -100,8 +112,10 @@ class LivewireDatatable extends Component
                 'align',
                 'type',
                 'filterable',
-                'filterview',
+                'filterView',
                 'name',
+                'params',
+                'width',
             ])->toArray();
         })->toArray();
     }
@@ -123,6 +137,7 @@ class LivewireDatatable extends Component
 
     public function getProcessedColumnsProperty()
     {
+        // dd($this->columns());
         return ColumnSet::build($this->columns())
             ->include($this->include)
             ->exclude($this->exclude)
@@ -153,14 +168,14 @@ class LivewireDatatable extends Component
 
     public function resolveAdditionalSelects($column)
     {
-        $selects = collect($column->additionalSelects)->map(function ($select) {
+        $selects = collect($column->additionalSelects)->map(function ($select) use ($column) {
             return Str::contains($select, '.')
-                ? $this->resolveRelationColumn($select, Str::contains($select, ':') ? Str::before($select, ':') : null)
+                ? $this->resolveRelationColumn($select, Str::contains($select, ':') ? Str::after($select, ':') : null, $column->name)
                 : $this->query->getModel()->getTable().'.'.$select;
         });
 
         return $selects->count() > 1
-            ? new Expression('CONCAT_WS("'.static::SEPARATOR.'" ,'.
+            ? new Expression("CONCAT_WS('".static::SEPARATOR."' ,".
                 collect($selects)->map(function ($select) {
                     return "COALESCE($select, '')";
                 })->join(', ').')')
@@ -175,68 +190,71 @@ class LivewireDatatable extends Component
         ];
     }
 
-    public function getSelectStatements($withAlias = false)
+    public function getSelectStatements($withAlias = false, $export = false)
     {
-        return $this->processedColumns->columns->reject(function ($column) {
-            return $column->scope;
-        })->map(function ($column) {
-            if ($column->select) {
-                return $column;
-            }
-
-            if ($column->isType('checkbox')) {
-                $column->select = $this->resolveCheckboxColumnName($column);
-
-                return $column;
-            }
-
-            if (Str::startsWith($column->name, 'callback_')) {
-                $column->select = $this->resolveAdditionalSelects($column);
-
-                return $column;
-            }
-
-            $column->select = $this->resolveColumnName($column);
-
-            if ($column->isEditable()) {
-                $column->select = $this->resolveEditableColumnName($column);
-            }
-
-            return $column;
-        })->when($withAlias, function ($columns) {
-            return $columns->map(function ($column) {
-                if (! $column->select) {
-                    return null;
-                }
-                if ($column->select instanceof Expression) {
-                    return new Expression($column->select->getValue().' AS `'.$column->name.'`');
+        return $this->processedColumns->columns
+            ->reject(function ($column) use ($export) {
+                return $column->scope || ($export && $column->preventExport);
+            })->map(function ($column) {
+                if ($column->select) {
+                    return $column;
                 }
 
-                if (is_array($column->select)) {
-                    $selects = $column->select;
-                    $first = array_shift($selects).' AS '.$column->name;
-                    $others = array_map(function ($select) {
-                        return $select.' AS '.$select;
-                    }, $selects);
+                if ($column->isType('checkbox')) {
+                    $column->select = $this->resolveCheckboxColumnName($column);
 
-                    return array_merge([$first], $others);
+                    return $column;
                 }
 
-                return $column->select.' AS '.$column->name;
+                if (Str::startsWith($column->name, 'callback_')) {
+                    $column->select = $this->resolveAdditionalSelects($column);
+
+                    return $column;
+                }
+
+                $column->select = $this->resolveColumnName($column);
+
+                if ($column->isEditable()) {
+                    $column->select = $this->resolveEditableColumnName($column);
+                }
+
+                return $column;
+            })->when($withAlias, function ($columns) {
+                return $columns->map(function ($column) {
+                    if (! $column->select) {
+                        return null;
+                    }
+                    if ($column->select instanceof Expression) {
+                        $sep_string = config('database.default') === 'pgsql' ? '"' : '`';
+
+                        return new Expression($column->select->getValue().' AS '.$sep_string.$column->name.$sep_string);
+                    }
+
+                    if (is_array($column->select)) {
+                        $selects = $column->select;
+                        $first = array_shift($selects).' AS '.$column->name;
+                        $others = array_map(function ($select) {
+                            return $select.' AS '.$select;
+                        }, $selects);
+
+                        return array_merge([$first], $others);
+                    }
+
+                    return $column->select.' AS '.$column->name;
+                });
+            }, function ($columns) {
+                return $columns->map->select;
             });
-        }, function ($columns) {
-            return $columns->map->select;
-        });
     }
 
-    protected function resolveRelationColumn($name, $aggregate = null)
+    protected function resolveRelationColumn($name, $aggregate = null, $alias = null)
     {
         $parts = explode('.', Str::before($name, ':'));
         $columnName = array_pop($parts);
         $relation = implode('.', $parts);
 
         return  method_exists($this->query->getModel(), $parts[0])
-            ? $this->joinRelation($relation, $columnName, $aggregate, $name)
+            ? $this->joinRelation($relation, $columnName, $aggregate, $alias ?? $name)
             : $name;
     }
 
@@ -355,6 +373,7 @@ class LivewireDatatable extends Component
     public function getSortString()
     {
         $column = $this->freshColumns[$this->sort];
+        $dbTable = DB::connection()->getPDO()->getAttribute(\PDO::ATTR_DRIVER_NAME);
 
         switch (true) {
             case $column['sort']:
@@ -373,8 +392,10 @@ class LivewireDatatable extends Component
                 return Str::before($column['select'], ' AS ');
                 break;
 
-            default:
-                return new Expression('`'.$column['name'].'`');
+             default:
+                return $dbTable == 'pgsql' || $dbTable == 'sqlsrv'
+                    ? new Expression('"'.$column['name'].'"')
+                    : new Expression('`'.$column['name'].'`');
                 break;
         }
     }
@@ -397,6 +418,9 @@ class LivewireDatatable extends Component
             $this->sort = (int) $index;
         }
         $this->page = 1;
+
+        $key = Str::snake(Str::afterLast(get_called_class(), '\\'));
+        session()->put([$key.$this->name.'_sort' => $this->sort, $key.$this->name.'_direction' => $this->direction]);
     }
 
     public function toggle($index)
@@ -458,14 +482,14 @@ class LivewireDatatable extends Component
 
     public function doNumberFilterStart($index, $start)
     {
-        $this->activeNumberFilters[$index]['start'] = (int) $start;
+        $this->activeNumberFilters[$index]['start'] = $start ? (int) $start : null;
         $this->clearEmptyNumberFilter($index);
         $this->page = 1;
     }
 
     public function doNumberFilterEnd($index, $end)
     {
-        $this->activeNumberFilters[$index]['end'] = $end ? (int) $end : null;
+        $this->activeNumberFilters[$index]['end'] = ($end !== '') ? (int) $end : null;
         $this->clearEmptyNumberFilter($index);
         $this->page = 1;
     }
@@ -520,7 +544,7 @@ class LivewireDatatable extends Component
 
     public function removeTextFilter($column, $key = null)
     {
-        if ($key) {
+        if (isset($key)) {
             unset($this->activeTextFilters[$column][$key]);
             if (count($this->activeTextFilters[$column]) < 1) {
                 unset($this->activeTextFilters[$column]);
@@ -677,15 +701,25 @@ class LivewireDatatable extends Component
 
     public function columnAggregateType($column)
     {
-        return $column['type'] === 'string'
-            ? 'group_concat'
-            : 'count';
+        return Str::contains($column['name'], ':')
+            ? Str::after(explode('.', $column['name'])[1], ':')
+            : (
+                $column['type'] === 'string'
+                    ? 'group_concat'
+                    : 'count'
+            );
     }
 
-    public function buildDatabaseQuery()
+    public function buildDatabaseQuery($export = false)
     {
         $this->query = $this->builder();
-        $this->query->addSelect($this->getSelectStatements(true)->filter()->flatten()->toArray());
+
+        $this->query->addSelect(
+            $this->getSelectStatements(true, $export)
+                ->filter()
+                ->flatten()
+                ->toArray()
+        );
 
         $this->addGlobalSearch()
             ->addScopeColumns()
@@ -712,10 +746,10 @@ class LivewireDatatable extends Component
                             foreach ($this->getColumnField($i) as $column) {
                                 $query->when(is_array($column), function ($query) use ($search, $column) {
                                     foreach ($column as $col) {
-                                        $query->orWhereRaw('LOWER('.$col.') like ?', "%$search%");
+                                        $query->orWhereRaw('LOWER('.$col.') like ?', '%'.strtolower($search).'%');
                                     }
                                 }, function ($query) use ($search, $column) {
-                                    $query->orWhereRaw('LOWER('.$column.') like ?', "%$search%");
+                                    $query->orWhereRaw('LOWER('.$column.') like ?', '%'.strtolower($search).'%');
                                 });
                             }
                         });
@@ -725,6 +759,11 @@ class LivewireDatatable extends Component
         });
 
         return $this;
+    }
+
+    public function updatingSearch()
+    {
+        $this->resetPage();
     }
 
     public function addScopeColumns()
@@ -776,11 +815,23 @@ class LivewireDatatable extends Component
                     $this->addScopeSelectFilter($query, $index, $value);
                 } elseif ($this->columnIsAggregateRelation($this->freshColumns[$index])) {
                     $this->addAggregateFilter($query, $index, $value);
+                } elseif ($this->freshColumns[$index]['type'] === 'string') {
+                    if ($value == 1) {
+                        $query->whereNotNull($this->getColumnField($index)[0])
+                            ->where($this->getColumnField($index)[0], '<>', '');
+                    } elseif (strlen($value)) {
+                        $query->where(function ($query) use ($index) {
+                            $query->whereNull(DB::raw($this->getColumnField($index)[0]))
+                                ->orWhere(DB::raw($this->getColumnField($index)[0]), '');
+                        });
+                    }
                 } elseif ($value == 1) {
                     $query->where(DB::raw($this->getColumnField($index)[0]), '>', 0);
                 } elseif (strlen($value)) {
-                    $query->whereNull(DB::raw($this->getColumnField($index)[0]))
-                        ->orWhere(DB::raw($this->getColumnField($index)[0]), 0);
+                    $query->where(function ($query) use ($index) {
+                        $query->whereNull(DB::raw($this->getColumnField($index)[0]))
+                            ->orWhere(DB::raw($this->getColumnField($index)[0]), 0);
+                    });
                 }
             }
         });
@@ -828,12 +879,13 @@ class LivewireDatatable extends Component
                 } else {
                     $this->addScopeNumberFilter($query, $index, [
                         isset($filter['start']) ? $filter['start'] : 0,
-                        isset($filter['end']) ? $filter['end'] : 9999999,
+                        isset($filter['end']) ? $filter['end'] : 9999999999,
                     ])
-                        ?? $query->whereRaw($this->getColumnField($index)[0].' BETWEEN ? AND ?', [
-                            isset($filter['start']) ? $filter['start'] : 0,
-                            isset($filter['end']) ? $filter['end'] : 9999999,
-                        ]);
+                        ?? $query->when(isset($filter['start']), function ($query) use ($filter, $index) {
+                            $query->whereRaw($this->getColumnField($index)[0].' >= ?', $filter['start']);
+                        })->when(isset($filter['end']), function ($query) use ($filter, $index) {
+                            $query->whereRaw($this->getColumnField($index)[0].' <= ?', $filter['end']);
+                        });
                 }
             }
         });
@@ -931,7 +983,7 @@ class LivewireDatatable extends Component
                     $row->$name = $this->callbacks[$name]($value, $row);
                 }
 
-                if ($this->search && $this->searchableColumns()->firstWhere('name', $name)) {
+                if ($this->search && ! config('livewire-datatables.suppress_search_highlights') && $this->searchableColumns()->firstWhere('name', $name)) {
                     $row->$name = $this->highlight($row->$name, $this->search);
                 }
             }
@@ -949,13 +1001,41 @@ class LivewireDatatable extends Component
             : $value;
     }
 
+    /*  This can be called to apply highlting of the search term to some string.
+     *  Motivation: Call this from your Column::Callback to apply highlight to a chosen section of the result.
+     */
+    public function highlightStringWithCurrentSearchTerm(string $originalString)
+    {
+        if (! $this->search) {
+            return $originalString;
+        } else {
+            return static::highlightString($originalString, $this->search);
+        }
+    }
+
+    /* Utility function for applying highlighting to given string */
+    public static function highlightString(string $originalString, string $searchingForThisSubstring)
+    {
+        $searchStringNicelyHighlightedWithHtml = view(
+            'datatables::highlight',
+            ['slot' => $searchingForThisSubstring]
+        )->render();
+        $stringWithHighlightedSubstring = str_ireplace(
+            $searchingForThisSubstring,
+            $searchStringNicelyHighlightedWithHtml,
+            $originalString
+        );
+
+        return $stringWithHighlightedSubstring;
+    }
+
     public function highlight($value, $string)
     {
         $output = substr($value, stripos($value, $string), strlen($string));
 
         if ($value instanceof View) {
             return $value
-                ->with(['value' => str_ireplace($string, view('datatables::highlight', ['slot' => $output]), $value->gatherData()['value'])]);
+                ->with(['value' => str_ireplace($string, view('datatables::highlight', ['slot' => $output]), $value->gatherData()['value'] ?? $value->gatherData()['slot'])]);
         }
 
         return str_ireplace($string, view('datatables::highlight', ['slot' => $output]), $value);
@@ -963,6 +1043,8 @@ class LivewireDatatable extends Component
 
     public function render()
     {
+        $this->emit('refreshDynamic');
+
         return view('datatables::datatable');
     }
 
@@ -970,12 +1052,12 @@ class LivewireDatatable extends Component
     {
         $this->forgetComputed();
 
-        return Excel::download(new DatatableExport($this->getQuery()->get()), 'DatatableExport.xlsx');
+        return Excel::download(new DatatableExport($this->getQuery(true)->get()), 'DatatableExport.xlsx');
     }
 
-    public function getQuery()
+    public function getQuery($export = false)
     {
-        $this->buildDatabaseQuery();
+        $this->buildDatabaseQuery($export);
 
         return $this->query->toBase();
     }
